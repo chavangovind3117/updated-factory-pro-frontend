@@ -12,6 +12,7 @@ import { WebView } from "react-native-webview";
 import { useRoute } from "@react-navigation/native";
 import { useToast } from "react-native-toast-notifications";
 import { updateLandArea, fetchLandIdDetails } from "../utils/apiService"; // added fetchLandIdDetails
+import * as Location from 'expo-location';
 
 const { width, height } = Dimensions.get("window");
 
@@ -32,6 +33,7 @@ export default function MapWebView({ navigation }) {
   });
   const [distanceKm, setDistanceKm] = useState(0);
   const [modalVisible, setModalVisible] = useState(false);
+  const [locationPermission, setLocationPermission] = useState(false);
 
   // send JS to WebView
   const exec = (js) => {
@@ -48,6 +50,22 @@ export default function MapWebView({ navigation }) {
         setIsClosed(Boolean(data.isClosed));
         if (data.area) setArea(data.area);
         if (typeof data.distanceKm === "number") setDistanceKm(data.distanceKm);
+      }
+      if (data?.type === 'requestLocation') {
+        (async () => {
+          if (locationPermission) {
+            try {
+              const location = await Location.getCurrentPositionAsync({});
+              const { latitude, longitude } = location.coords;
+              exec(`window.setUserLocation(${latitude}, ${longitude})`);
+            } catch (err) {
+              console.warn('Failed to get current location', err);
+              Alert.alert('Location Error', 'Could not fetch your current location.');
+            }
+          } else {
+            Alert.alert('Permission Denied', 'Location permission is required to show your current location.');
+          }
+        })();
       }
     } catch (e) {
       console.warn("Invalid message from WebView", e);
@@ -92,6 +110,17 @@ export default function MapWebView({ navigation }) {
     })();
   }, [growerID, landID]);
 
+  useEffect(() => {
+    (async () => {
+        try {
+            const { status } = await Location.requestForegroundPermissionsAsync();
+            setLocationPermission(status === 'granted');
+        } catch (err) {
+            console.warn('Error requesting location permission:', err);
+        }
+    })();
+}, []);
+
 // ...existing code...
 const handleSave = async () => {
   if (!points || points.length < 3) {
@@ -133,9 +162,49 @@ const handleSave = async () => {
   <head>
     <meta name="viewport" content="initial-scale=1.0, maximum-scale=1.0">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <style>html,body,#map{height:100%;margin:0;padding:0} .leaflet-control-layers { font-size:14px; }</style>
+    <style>
+        html,body,#map{height:100%;margin:0;padding:0}
+        .leaflet-control-layers { font-size:14px; }
+        .location-marker {
+            background: none;
+            border: none;
+        }
+        .leaflet-control a:hover {
+            background-color: #f4f4f4;
+        }
+        .google-earth-location {
+            width: 18px;
+            height: 18px;
+            background-color: #4285F4;
+            border-radius: 50%;
+            border: 2px solid white;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        }
+        .leaflet-control-location-clicked {
+            background-color: #f4f4f4 !important;
+        }
+        #loader {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            z-index: 1000;
+            display: none;
+        }
+        @keyframes spin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+    </style>
   </head>
   <body>
+    <div id="loader"></div>
     <div id="map"></div>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
@@ -146,6 +215,48 @@ const handleSave = async () => {
         const esriSat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, attribution: 'Tiles &copy; Esri' });
         osm.addTo(map);
         L.control.layers({ "Street (OSM)": osm, "Satellite (Esri)": esriSat }, null, { collapsed: false }).addTo(map);
+
+        // Add location control
+         const locateControl = L.control({position: 'topleft'});
+        locateControl.onAdd = function(map) {
+            const div = L.DomUtil.create('div', 'leaflet-bar leaflet-control');
+            // ask RN for location instead of using navigator.geolocation inside WebView
+            div.innerHTML = '<a href="#" title="Show my location" style="display:flex;width:30px;height:30px;line-height:30px;background:white;text-align:center;font-size:20px;color:#666;text-decoration:none;align-items:center;justify-content:center;"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 8c-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4-1.79-4-4-4zm8.94 3c-.46-4.17-3.77-7.48-7.94-7.94V1h-2v2.06C6.83 3.52 3.52 6.83 3.06 11H1v2h2.06c.46 4.17 3.77 7.48 7.94 7.94V23h2v-2.06c4.17-.46 7.48-3.77 7.94-7.94H23v-2h-2.06zM12 19c-3.87 0-7-3.13-7-7s3.13-7 7-7 7 3.13 7 7-3.13 7-7 7z"></path></svg></a>';
+            div.onclick = function(e) {
+                e.preventDefault();
+                L.DomEvent.stopPropagation(e);
+                document.getElementById('loader').style.display = 'block';
+                try {
+                  window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'requestLocation' }));
+                } catch(err) {
+                  console.warn('postMessage failed', err);
+                  document.getElementById('loader').style.display = 'none';
+                }
+                return false;
+            };
+            return div;
+        };
+        locateControl.addTo(map);
+        // helper function called from RN to set user location and center map
+        window.setUserLocation = function(lat, lng){
+          try {
+            document.getElementById('loader').style.display = 'none';
+            if (window.locationMarker) {
+              map.removeLayer(window.locationMarker);
+            }
+            window.locationMarker = L.marker([lat, lng], {
+              icon: L.divIcon({
+                html: '<div class="google-earth-location"></div>',
+                className: 'location-marker',
+                iconSize: [22, 22],
+                iconAnchor: [11, 11]
+              })
+            }).addTo(map);
+            map.setView([lat, lng], 18);
+          } catch(e) {
+            console.error('setUserLocation error', e);
+          }
+        };
 
         let pts = [];
         let markerLayer = L.layerGroup().addTo(map);
@@ -356,6 +467,7 @@ const handleSave = async () => {
           onMessage={onMessage}
           javaScriptEnabled
           domStorageEnabled
+          geolocationEnabled={true}
           style={styles.webview}
         />
         <View pointerEvents="none" style={styles.crosshair}>
